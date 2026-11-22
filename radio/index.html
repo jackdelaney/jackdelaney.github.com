@@ -3,15 +3,17 @@
   Radio — a minimal internet radio player.
 
   How it works (read this first if you want to change things):
-  1. A "station" is just { name, url, color }. The url is a live audio stream.
+  1. A "station" is just { name, url, color, logo? }. The url is a live audio stream.
   2. Stations are saved in your browser's localStorage, so they stay on this
      device between visits. Nothing is sent anywhere.
   3. Playback uses a single <audio> element. Setting audio.src to a stream URL
      and calling audio.play() is all it takes to "tune in".
-  4. "Find stations" searches the free Radio Browser directory
+  4. If the stream drops, the player retries on its own (section 3b).
+  5. Song titles are fetched where the station makes them public (section 4).
+  6. "Find stations" searches the free Radio Browser directory
      (https://www.radio-browser.info) so you don't have to hunt for URLs.
-  5. The Media Session API puts the station name and play/pause on your
-     phone's lock screen.
+  7. The Media Session API puts the station, song and play/pause on your
+     lock screen and the CarPlay "Now Playing" screen.
 
   This file has no front matter, so Jekyll copies it to /radio/ untouched.
 -->
@@ -86,12 +88,18 @@
     position: absolute; top: 10px; left: 14px;
     font-size: 44px; font-weight: 800; opacity: .35; letter-spacing: -0.04em;
   }
+  .tile .logo {
+    position: absolute; top: 14px; left: 14px;
+    width: 56px; height: 56px; border-radius: 12px;
+    object-fit: contain; background: #fff;
+  }
   .tile .name { font-weight: 650; font-size: 15px; line-height: 1.2; }
   .tile.playing { outline: 3px solid var(--text); outline-offset: 3px; }
   .tile .edit {
     position: absolute; top: 8px; right: 8px;
     width: 30px; height: 30px; border-radius: 50%; padding: 0;
     background: rgba(0,0,0,.25); color: #fff; border: none; font-size: 16px; line-height: 30px;
+    text-align: center;
   }
   .empty { max-width: 900px; margin: 40px auto; text-align: center; color: var(--muted); }
 
@@ -102,9 +110,13 @@
     padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
   }
   #player .inner { max-width: 900px; margin: 0 auto; display: flex; align-items: center; gap: 12px; }
-  #swatch { width: 48px; height: 48px; border-radius: 12px; background: var(--line); flex: none; }
+  #swatch {
+    width: 48px; height: 48px; border-radius: 12px; background: var(--line); flex: none;
+    background-size: contain; background-position: center; background-repeat: no-repeat;
+  }
   #nowInfo { flex: 1; min-width: 0; }
-  #nowName { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #nowName, #nowStatus { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #nowName { font-weight: 650; }
   #nowStatus { font-size: 13px; color: var(--muted); }
   #playBtn {
     width: 48px; height: 48px; border-radius: 50%; padding: 0; flex: none;
@@ -122,10 +134,13 @@
   dialog::backdrop { background: rgba(0,0,0,.45); }
   dialog h2 { margin: 0 0 14px; font-size: 20px; }
   label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
-  input[type=text], input[type=url], input[type=search] {
+  input[type=text], input[type=url], input[type=search], select {
     width: 100%; font: inherit; color: inherit; background: var(--bg);
     border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
   }
+  .search-row { display: flex; gap: 8px; }
+  .search-row select { width: auto; flex: none; }
+  .search-row input { flex: 1; min-width: 0; }
   .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
   .row .spacer { flex: 1; }
   .colors { display: flex; gap: 8px; flex-wrap: wrap; }
@@ -136,10 +151,12 @@
     display: flex; align-items: center; gap: 10px;
     padding: 10px 0; border-bottom: 1px solid var(--line);
   }
+  #results img { width: 36px; height: 36px; border-radius: 8px; object-fit: contain; background: #fff; flex: none; }
   #results .meta { flex: 1; min-width: 0; }
   #results .meta div:first-child { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   #results .meta div:last-child { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+  .error { color: var(--accent); }
 </style>
 </head>
 <body>
@@ -177,7 +194,7 @@
     <input id="fName" type="text" required placeholder="e.g. Groove Salad">
     <label for="fUrl">Stream URL</label>
     <input id="fUrl" type="url" required placeholder="https://…/stream.mp3">
-    <p class="hint">Must start with https:// — browsers block plain http audio on secure pages.</p>
+    <p class="hint" id="urlHint">Must start with https:// — browsers block plain http audio on secure pages.</p>
     <label>Colour</label>
     <div class="colors" id="colorPicker"></div>
     <div class="row">
@@ -192,8 +209,13 @@
 <!-- Search the Radio Browser directory -->
 <dialog id="findDialog">
   <h2>Find stations</h2>
-  <form id="searchForm">
-    <input id="query" type="search" placeholder="Station name, genre, or city" autocomplete="off">
+  <form id="searchForm" class="search-row">
+    <select id="mode" aria-label="Search by">
+      <option value="name">Name</option>
+      <option value="tag">Genre</option>
+      <option value="country">Country</option>
+    </select>
+    <input id="query" type="search" placeholder="e.g. KEXP" autocomplete="off" enterkeyhint="search">
   </form>
   <p class="hint" id="searchStatus">Results come from radio-browser.info, a free community directory.</p>
   <ul id="results"></ul>
@@ -202,9 +224,10 @@
 
 <script>
 // ---------------------------------------------------------------------------
-// 1. Saving and loading stations
+// 1. Saving and loading
 // ---------------------------------------------------------------------------
 const STORAGE_KEY = 'radio.stations.v1';
+const LAST_KEY = 'radio.last.v1'; // URL of the last station played
 const COLORS = ['#e4572e', '#f3a712', '#29335c', '#669bbc', '#2a9d8f', '#8e44ad', '#c0392b', '#3d405b', '#118ab2', '#6a994e'];
 
 // A few starter stations so the page isn't empty on first visit.
@@ -214,16 +237,18 @@ const DEFAULT_STATIONS = [
   { name: 'KEXP Seattle',        url: 'https://kexp.streamguys1.com/kexp160.aac',     color: '#e4572e' },
 ];
 
+// localStorage can throw (private mode, blocked storage), so wrap every use.
+function store(key, value) { try { localStorage.setItem(key, value); } catch (e) {} }
+function recall(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
+
 function loadStations() {
   try {
-    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    const saved = JSON.parse(recall(STORAGE_KEY));
     if (Array.isArray(saved)) return saved;
-  } catch (e) { /* storage blocked or corrupt: fall through to defaults */ }
+  } catch (e) { /* corrupt: fall through to defaults */ }
   return DEFAULT_STATIONS.slice();
 }
-function saveStations() {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(stations)); } catch (e) {}
-}
+function saveStations() { store(STORAGE_KEY, JSON.stringify(stations)); }
 
 let stations = loadStations();
 let current = null; // the station object currently loaded in the player
@@ -251,6 +276,16 @@ function render() {
     tile.querySelector('.initials').textContent = initials(station.name);
     tile.querySelector('.name').textContent = station.name;
 
+    // Logo from the directory, if there is one. If the image fails to load,
+    // remove it and the initials show instead.
+    if (station.logo) {
+      const img = document.createElement('img');
+      img.className = 'logo'; img.alt = ''; img.src = station.logo;
+      img.onload = () => tile.querySelector('.initials').remove();
+      img.onerror = () => img.remove();
+      tile.appendChild(img);
+    }
+
     tile.addEventListener('click', (e) => {
       if (e.target.classList.contains('edit')) openEditor(index);
       else togglePlay(station);
@@ -268,65 +303,204 @@ const nowName = document.getElementById('nowName');
 const nowStatus = document.getElementById('nowStatus');
 const swatch = document.getElementById('swatch');
 
+// wantPlaying = what the *user* asked for. The browser may stop on its own
+// (network drop); when wantPlaying is still true we try to reconnect.
+let wantPlaying = false;
+
 function togglePlay(station) {
-  // Tapping the station that's already playing pauses it.
-  if (current && current.url === station.url && !audio.paused) {
+  // Tapping the station that's already playing stops it.
+  if (current && current.url === station.url && wantPlaying) {
     stop();
     return;
   }
   current = station;
-  audio.src = station.url;  // pointing the audio element at the stream...
-  audio.play().catch(err => { // ...and asking it to play is all "tuning in" is
-    setStatus('Could not play this stream');
-    console.warn(err);
-  });
-  nowName.textContent = station.name;
-  swatch.style.background = station.color;
-  updateMediaSession(station);
+  store(LAST_KEY, station.url);
+  showStation(station);
+  songTitle = null;
+  wantPlaying = true;
+  retries = 0;
+  startStream();
   render();
+}
+
+function startStream() {
+  clearTimeout(retryTimer);
+  audio.src = current.url;    // pointing the audio element at the stream...
+  audio.play().catch(err => { // ...and asking it to play is all "tuning in" is
+    console.warn(err);
+    if (err.name === 'NotAllowedError') { wantPlaying = false; setStatus('Tap ▶ to play'); }
+    // other failures also fire the audio 'error' event, handled below
+  });
+  pollTitle();
 }
 
 function stop() {
   // For live radio, "pause" should really mean stop: otherwise resuming plays
   // stale buffered audio. Clearing src drops the connection entirely.
+  wantPlaying = false;
+  clearTimeout(retryTimer); clearTimeout(watchdog); clearTimeout(titleTimer);
   audio.pause();
   audio.removeAttribute('src');
   audio.load();
   setStatus('Stopped');
 }
 
-function resume() {
-  if (current) togglePlay(current);
-}
+function resume() { if (current) togglePlay(current); }
 
 playBtn.addEventListener('click', () => {
   if (!current) { if (stations[0]) togglePlay(stations[0]); return; }
-  audio.paused ? resume() : stop();
+  wantPlaying ? stop() : resume();
 });
 
 document.getElementById('volume').addEventListener('input', e => { audio.volume = e.target.value; });
 
-// The audio element fires events as its state changes; we mirror them in the UI.
-function setStatus(text) {
-  nowStatus.textContent = text;
-  playBtn.textContent = audio.paused ? '▶' : '❚❚';
+function showStation(station) {
+  nowName.textContent = station.name;
+  swatch.style.backgroundColor = station.color;
+  swatch.style.backgroundImage = station.logo ? `url("${station.logo}")` : '';
 }
-audio.addEventListener('waiting', () => setStatus('Connecting…'));
-audio.addEventListener('playing', () => setStatus('Live'));
-audio.addEventListener('pause',   () => { if (!audio.error) setStatus('Stopped'); });
-audio.addEventListener('error',   () => { if (audio.getAttribute('src')) setStatus('Stream error'); });
 
-// Lock-screen / headphone controls
-function updateMediaSession(station) {
-  if (!('mediaSession' in navigator)) return;
-  navigator.mediaSession.metadata = new MediaMetadata({ title: station.name, artist: 'Live radio' });
+function setStatus(text, isError = false) {
+  nowStatus.textContent = text;
+  nowStatus.classList.toggle('error', isError);
+  playBtn.textContent = wantPlaying ? '❚❚' : '▶';
+}
+
+// --- 3b. Auto-reconnect -----------------------------------------------------
+// Streams drop when you lose signal or switch Wi-Fi <-> cellular. Sometimes the
+// browser reports an error; sometimes it just sits "buffering" forever. We
+// handle both: retry on error, and treat >15s of buffering as a failure.
+const MAX_RETRIES = 5;
+let retries = 0, retryTimer = null, watchdog = null;
+
+function reconnect(reason) {
+  if (!wantPlaying || !current) return;
+  clearTimeout(watchdog);
+  if (retries >= MAX_RETRIES) {
+    wantPlaying = false;
+    setStatus(reason + ' — gave up', true);
+    return;
+  }
+  retries++;
+  const delay = Math.min(2000 * 2 ** (retries - 1), 15000); // 2s, 4s, 8s, 15s…
+  setStatus(`${reason}. Retrying (${retries}/${MAX_RETRIES})…`, true);
+  retryTimer = setTimeout(startStream, delay);
+}
+
+// Turn the browser's error code into something readable.
+function describeError() {
+  const code = audio.error && audio.error.code;
+  if (code === 2) return 'Network error';
+  if (code === 3) return 'Stream format problem';
+  if (code === 4) return 'Stream not supported or URL wrong';
+  return 'Could not play';
+}
+
+audio.addEventListener('waiting', () => {
+  if (!wantPlaying) return;
+  setStatus('Connecting…');
+  clearTimeout(watchdog);
+  watchdog = setTimeout(() => reconnect('No data'), 15000);
+});
+audio.addEventListener('playing', () => {
+  clearTimeout(watchdog);
+  retries = 0;
+  wantPlaying = true;
+  setStatus(songTitle ? `Live · ${songTitle}` : 'Live');
+});
+audio.addEventListener('error', () => {
+  if (audio.getAttribute('src')) reconnect(describeError());
+});
+audio.addEventListener('ended', () => reconnect('Stream ended')); // live streams shouldn't "end"
+audio.addEventListener('pause', () => {
+  // Paused by the system (e.g. a phone call or another app took audio)
+  if (wantPlaying && !audio.error) { wantPlaying = false; setStatus('Paused'); }
+});
+// When the phone gets its connection back, reconnect straight away.
+window.addEventListener('online', () => { if (wantPlaying) { retries = 0; startStream(); } });
+
+// ---------------------------------------------------------------------------
+// 4. Song titles ("now playing")
+// ---------------------------------------------------------------------------
+// Browsers can't read song titles out of the audio stream itself, so we ask
+// the station's server separately. This only works where the server allows
+// it; for everything else we just show "Live". Two methods:
+//   - SomaFM publishes a song list per channel.
+//   - Many stations run Icecast servers, which publish /status-json.xsl.
+let songTitle = null, titleTimer = null;
+const noTitles = new Set(); // stations we've learned have no public titles
+
+async function fetchJSON(url) {
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 5000);
+  try {
+    const res = await fetch(url, { signal: ctrl.signal });
+    if (!res.ok) throw new Error(res.status);
+    return await res.json();
+  } finally { clearTimeout(t); }
+}
+
+async function fetchTitle(station) {
+  const u = new URL(station.url);
+
+  if (u.hostname.endsWith('somafm.com')) {
+    const channel = u.pathname.match(/^\/([a-z0-9]+)/i);
+    if (channel) {
+      const data = await fetchJSON(`https://somafm.com/songs/${channel[1]}.json`);
+      const s = data.songs && data.songs[0];
+      if (s) return [s.artist, s.title].filter(Boolean).join(' – ');
+    }
+  }
+
+  const data = await fetchJSON(`${u.origin}/status-json.xsl`);
+  let sources = data.icestats && data.icestats.source;
+  if (!sources) return null;
+  if (!Array.isArray(sources)) sources = [sources];
+  const src = sources.find(s => s.listenurl && s.listenurl.endsWith(u.pathname)) || (sources.length === 1 ? sources[0] : null);
+  if (!src) return null;
+  return src.title || [src.artist, src.title].filter(Boolean).join(' – ') || null;
+}
+
+async function pollTitle() {
+  clearTimeout(titleTimer);
+  const station = current;
+  if (!station || !wantPlaying || noTitles.has(station.url)) { updateMediaSession(); return; }
+  try {
+    const title = await fetchTitle(station);
+    if (station !== current) return; // user switched station meanwhile
+    songTitle = title;
+    if (!title) noTitles.add(station.url);
+  } catch (e) {
+    noTitles.add(station.url); // blocked or not available: stop asking
+    songTitle = null;
+  }
+  if (!audio.paused && wantPlaying) setStatus(songTitle ? `Live · ${songTitle}` : 'Live');
+  updateMediaSession();
+  if (!noTitles.has(station.url)) titleTimer = setTimeout(pollTitle, 20000);
+}
+
+// Lock screen, headphones and CarPlay "Now Playing" all read this.
+function updateMediaSession() {
+  if (!('mediaSession' in navigator) || !current) return;
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: songTitle || current.name,
+    artist: songTitle ? current.name : 'Live radio',
+    artwork: current.logo ? [{ src: current.logo, sizes: '512x512' }] : [],
+  });
   navigator.mediaSession.setActionHandler('play', resume);
   navigator.mediaSession.setActionHandler('pause', stop);
   navigator.mediaSession.setActionHandler('stop', stop);
+  // Next/previous buttons (steering wheel, CarPlay, headphones) switch station.
+  const step = (dir) => () => {
+    const i = stations.findIndex(s => s.url === current.url);
+    if (stations.length) togglePlay(stations[(i + dir + stations.length) % stations.length]);
+  };
+  navigator.mediaSession.setActionHandler('nexttrack', step(1));
+  navigator.mediaSession.setActionHandler('previoustrack', step(-1));
 }
 
 // ---------------------------------------------------------------------------
-// 4. Adding / editing a station by hand
+// 5. Adding / editing a station by hand
 // ---------------------------------------------------------------------------
 const editDialog = document.getElementById('editDialog');
 const fName = document.getElementById('fName');
@@ -346,20 +520,31 @@ function pickColor(c) {
   colorPicker.querySelectorAll('button').forEach(b => b.classList.toggle('selected', b.dataset.color === c));
 }
 
-function openEditor(index = null, prefill = null) {
+function openEditor(index = null) {
   editingIndex = index;
-  const s = index !== null ? stations[index] : prefill || { name: '', url: '', color: COLORS[stations.length % COLORS.length] };
+  const s = index !== null ? stations[index] : { name: '', url: '', color: COLORS[stations.length % COLORS.length] };
   document.getElementById('editTitle').textContent = index !== null ? 'Edit station' : 'Add station';
   document.getElementById('deleteBtn').hidden = index === null;
   fName.value = s.name; fUrl.value = s.url; pickColor(s.color);
+  fUrl.setCustomValidity('');
   editDialog.showModal();
 }
+
+// Catch the two most common reasons a pasted URL won't play.
+fUrl.addEventListener('input', () => {
+  const v = fUrl.value.trim().toLowerCase();
+  let msg = '';
+  if (v.startsWith('http://')) msg = 'Plain http:// streams are blocked by browsers on secure pages. Try the https:// version, or use Find stations.';
+  else if (/\.(pls|m3u|asx)(\?|$)/.test(v)) msg = 'That is a playlist file, not the stream itself. Open it in a text editor and copy the URL inside, or use Find stations.';
+  fUrl.setCustomValidity(msg);
+});
 
 document.getElementById('addBtn').addEventListener('click', () => openEditor());
 document.getElementById('cancelEdit').addEventListener('click', () => editDialog.close());
 
 document.getElementById('editForm').addEventListener('submit', () => {
-  const station = { name: fName.value.trim(), url: fUrl.value.trim(), color: chosenColor };
+  const old = editingIndex !== null ? stations[editingIndex] : {};
+  const station = { ...old, name: fName.value.trim(), url: fUrl.value.trim(), color: chosenColor };
   if (editingIndex !== null) stations[editingIndex] = station;
   else stations.push(station);
   saveStations(); render();
@@ -372,14 +557,15 @@ document.getElementById('deleteBtn').addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------------------
-// 5. Searching the Radio Browser directory
+// 6. Searching the Radio Browser directory
 // ---------------------------------------------------------------------------
 // Radio Browser runs several mirror servers; if one is down we try the next.
 const API_SERVERS = ['https://de1.api.radio-browser.info', 'https://fi1.api.radio-browser.info', 'https://at1.api.radio-browser.info'];
 
-async function searchStations(term) {
+async function searchStations(mode, term) {
+  // mode is 'name', 'tag' (genre) or 'country' — Radio Browser's own field names
   const params = new URLSearchParams({
-    name: term, limit: 40, hidebroken: 'true', order: 'clickcount', reverse: 'true',
+    [mode]: term, limit: 60, hidebroken: 'true', order: 'clickcount', reverse: 'true',
   });
   for (const server of API_SERVERS) {
     try {
@@ -393,22 +579,28 @@ async function searchStations(term) {
 const findDialog = document.getElementById('findDialog');
 const results = document.getElementById('results');
 const searchStatus = document.getElementById('searchStatus');
+const modeSelect = document.getElementById('mode');
+const query = document.getElementById('query');
+const PLACEHOLDERS = { name: 'e.g. KEXP', tag: 'e.g. jazz, ambient, news', country: 'e.g. Ireland, Japan' };
+
+modeSelect.addEventListener('change', () => { query.placeholder = PLACEHOLDERS[modeSelect.value]; query.focus(); });
 
 document.getElementById('findBtn').addEventListener('click', () => {
   findDialog.showModal();
-  document.getElementById('query').focus();
+  query.focus();
 });
 document.getElementById('closeFind').addEventListener('click', () => findDialog.close());
 
 document.getElementById('searchForm').addEventListener('submit', async (e) => {
   e.preventDefault();
-  const term = document.getElementById('query').value.trim();
+  const term = query.value.trim();
   if (!term) return;
+  query.blur(); // hide the phone keyboard so results are visible
   results.innerHTML = '';
   searchStatus.textContent = 'Searching…';
   try {
     // Keep only https streams: http ones won't play on an https page.
-    const found = (await searchStations(term)).filter(s => s.url_resolved.startsWith('https://'));
+    const found = (await searchStations(modeSelect.value, term)).filter(s => s.url_resolved.startsWith('https://'));
     searchStatus.textContent = found.length ? `${found.length} stations` : 'No playable (https) stations found.';
     found.forEach(s => results.appendChild(resultRow(s)));
   } catch (err) {
@@ -426,17 +618,39 @@ function resultRow(s) {
   li.querySelector('.meta div:first-child').textContent = s.name.trim();
   li.querySelector('.meta div:last-child').textContent = details;
 
-  const station = { name: s.name.trim(), url: s.url_resolved, color: COLORS[Math.floor(Math.random() * COLORS.length)] };
+  // Only keep https logos (http images are blocked on https pages too).
+  const logo = s.favicon && s.favicon.startsWith('https://') ? s.favicon : undefined;
+  if (logo) {
+    const img = document.createElement('img');
+    img.src = logo; img.alt = ''; img.onerror = () => img.remove();
+    li.prepend(img);
+  }
+
+  const station = { name: s.name.trim(), url: s.url_resolved, color: COLORS[Math.floor(Math.random() * COLORS.length)], logo };
   li.querySelector('.preview').addEventListener('click', () => togglePlay(station));
-  li.querySelector('.add').addEventListener('click', (e) => {
-    if (stations.some(x => x.url === station.url)) { e.target.textContent = 'Added'; return; }
+  const addBtn = li.querySelector('.add');
+  if (stations.some(x => x.url === station.url)) { addBtn.textContent = 'Added'; addBtn.disabled = true; }
+  addBtn.addEventListener('click', () => {
     stations.push(station); saveStations(); render();
-    e.target.textContent = 'Added'; e.target.disabled = true;
+    addBtn.textContent = 'Added'; addBtn.disabled = true;
   });
   return li;
 }
 
+// ---------------------------------------------------------------------------
+// 7. Start-up: draw the grid and load the last station (ready to play).
+// Browsers don't allow audio to start without a tap, so we don't autoplay.
+// ---------------------------------------------------------------------------
 render();
+const lastUrl = recall(LAST_KEY);
+const last = lastUrl && stations.find(s => s.url === lastUrl);
+if (last) {
+  current = last;
+  showStation(last);
+  setStatus('Tap ▶ to play');
+  updateMediaSession();
+  render();
+}
 </script>
 </body>
 </html>
