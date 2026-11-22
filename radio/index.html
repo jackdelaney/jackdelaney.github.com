@@ -1,0 +1,442 @@
+<!doctype html>
+<!--
+  Radio — a minimal internet radio player.
+
+  How it works (read this first if you want to change things):
+  1. A "station" is just { name, url, color }. The url is a live audio stream.
+  2. Stations are saved in your browser's localStorage, so they stay on this
+     device between visits. Nothing is sent anywhere.
+  3. Playback uses a single <audio> element. Setting audio.src to a stream URL
+     and calling audio.play() is all it takes to "tune in".
+  4. "Find stations" searches the free Radio Browser directory
+     (https://www.radio-browser.info) so you don't have to hunt for URLs.
+  5. The Media Session API puts the station name and play/pause on your
+     phone's lock screen.
+
+  This file has no front matter, so Jekyll copies it to /radio/ untouched.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Radio</title>
+<!-- Lets "Add to Home Screen" on iPhone open this full-screen like an app -->
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Radio">
+<meta name="theme-color" content="#111111">
+<style>
+  :root {
+    --bg: #f4f2ee;
+    --surface: #ffffff;
+    --text: #1a1a1a;
+    --muted: #6b6b6b;
+    --line: #e2dfd9;
+    --accent: #e4572e;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111111;
+      --surface: #1d1d1d;
+      --text: #f2f2f2;
+      --muted: #9a9a9a;
+      --line: #2c2c2c;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    /* leave room for the player bar at the bottom */
+    padding: env(safe-area-inset-top) 16px calc(110px + env(safe-area-inset-bottom));
+    -webkit-tap-highlight-color: transparent;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    max-width: 900px; margin: 0 auto; padding: 20px 0 16px;
+  }
+  h1 { font-size: 28px; margin: 0; letter-spacing: -0.02em; }
+  .header-actions { display: flex; gap: 8px; }
+  button {
+    font: inherit; color: inherit; cursor: pointer;
+    border: 1px solid var(--line); background: var(--surface);
+    border-radius: 999px; padding: 8px 14px;
+  }
+  button.primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+  button.link { border: none; background: none; padding: 4px 6px; color: var(--muted); }
+
+  /* ---------- Station grid ---------- */
+  #grid {
+    max-width: 900px; margin: 0 auto;
+    display: grid; gap: 12px;
+    grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  }
+  .tile {
+    position: relative; aspect-ratio: 1;
+    border-radius: 18px; border: none; padding: 14px;
+    display: flex; flex-direction: column; justify-content: flex-end; align-items: flex-start;
+    text-align: left; color: #fff; overflow: hidden;
+    transition: transform .12s ease;
+  }
+  .tile:active { transform: scale(.97); }
+  .tile .initials {
+    position: absolute; top: 10px; left: 14px;
+    font-size: 44px; font-weight: 800; opacity: .35; letter-spacing: -0.04em;
+  }
+  .tile .name { font-weight: 650; font-size: 15px; line-height: 1.2; }
+  .tile.playing { outline: 3px solid var(--text); outline-offset: 3px; }
+  .tile .edit {
+    position: absolute; top: 8px; right: 8px;
+    width: 30px; height: 30px; border-radius: 50%; padding: 0;
+    background: rgba(0,0,0,.25); color: #fff; border: none; font-size: 16px; line-height: 30px;
+  }
+  .empty { max-width: 900px; margin: 40px auto; text-align: center; color: var(--muted); }
+
+  /* ---------- Bottom player bar ---------- */
+  #player {
+    position: fixed; left: 0; right: 0; bottom: 0;
+    background: var(--surface); border-top: 1px solid var(--line);
+    padding: 12px 16px calc(12px + env(safe-area-inset-bottom));
+  }
+  #player .inner { max-width: 900px; margin: 0 auto; display: flex; align-items: center; gap: 12px; }
+  #swatch { width: 48px; height: 48px; border-radius: 12px; background: var(--line); flex: none; }
+  #nowInfo { flex: 1; min-width: 0; }
+  #nowName { font-weight: 650; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #nowStatus { font-size: 13px; color: var(--muted); }
+  #playBtn {
+    width: 48px; height: 48px; border-radius: 50%; padding: 0; flex: none;
+    background: var(--text); color: var(--bg); border: none; font-size: 18px;
+  }
+  #volume { width: 90px; accent-color: var(--text); }
+  @media (max-width: 420px) { #volume { display: none; } } /* phones use hardware buttons */
+
+  /* ---------- Dialogs ---------- */
+  dialog {
+    border: none; border-radius: 18px; padding: 20px;
+    width: min(520px, calc(100vw - 32px));
+    background: var(--surface); color: var(--text);
+  }
+  dialog::backdrop { background: rgba(0,0,0,.45); }
+  dialog h2 { margin: 0 0 14px; font-size: 20px; }
+  label { display: block; font-size: 13px; color: var(--muted); margin: 10px 0 4px; }
+  input[type=text], input[type=url], input[type=search] {
+    width: 100%; font: inherit; color: inherit; background: var(--bg);
+    border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+  }
+  .row { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; flex-wrap: wrap; }
+  .row .spacer { flex: 1; }
+  .colors { display: flex; gap: 8px; flex-wrap: wrap; }
+  .colors button { width: 30px; height: 30px; padding: 0; border: 2px solid transparent; }
+  .colors button.selected { border-color: var(--text); }
+  #results { list-style: none; margin: 12px 0 0; padding: 0; max-height: 50vh; overflow-y: auto; }
+  #results li {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 0; border-bottom: 1px solid var(--line);
+  }
+  #results .meta { flex: 1; min-width: 0; }
+  #results .meta div:first-child { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #results .meta div:last-child { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .hint { font-size: 12px; color: var(--muted); margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Radio</h1>
+  <div class="header-actions">
+    <button id="findBtn">Find stations</button>
+    <button id="addBtn" class="primary">+ Add</button>
+  </div>
+</header>
+
+<main id="grid"></main>
+<p class="empty" id="empty" hidden>No stations yet. Tap <b>Find stations</b> or <b>+ Add</b>.</p>
+
+<!-- The player. One <audio> element is reused for every station. -->
+<audio id="audio" preload="none"></audio>
+<footer id="player">
+  <div class="inner">
+    <div id="swatch"></div>
+    <div id="nowInfo">
+      <div id="nowName">Nothing playing</div>
+      <div id="nowStatus">Tap a station</div>
+    </div>
+    <input id="volume" type="range" min="0" max="1" step="0.01" value="1" aria-label="Volume">
+    <button id="playBtn" aria-label="Play/Pause">▶</button>
+  </div>
+</footer>
+
+<!-- Add / edit a station by hand -->
+<dialog id="editDialog">
+  <form method="dialog" id="editForm">
+    <h2 id="editTitle">Add station</h2>
+    <label for="fName">Name</label>
+    <input id="fName" type="text" required placeholder="e.g. Groove Salad">
+    <label for="fUrl">Stream URL</label>
+    <input id="fUrl" type="url" required placeholder="https://…/stream.mp3">
+    <p class="hint">Must start with https:// — browsers block plain http audio on secure pages.</p>
+    <label>Colour</label>
+    <div class="colors" id="colorPicker"></div>
+    <div class="row">
+      <button type="button" class="link" id="deleteBtn" hidden>Delete</button>
+      <span class="spacer"></span>
+      <button type="button" id="cancelEdit">Cancel</button>
+      <button type="submit" class="primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<!-- Search the Radio Browser directory -->
+<dialog id="findDialog">
+  <h2>Find stations</h2>
+  <form id="searchForm">
+    <input id="query" type="search" placeholder="Station name, genre, or city" autocomplete="off">
+  </form>
+  <p class="hint" id="searchStatus">Results come from radio-browser.info, a free community directory.</p>
+  <ul id="results"></ul>
+  <div class="row"><button type="button" id="closeFind">Done</button></div>
+</dialog>
+
+<script>
+// ---------------------------------------------------------------------------
+// 1. Saving and loading stations
+// ---------------------------------------------------------------------------
+const STORAGE_KEY = 'radio.stations.v1';
+const COLORS = ['#e4572e', '#f3a712', '#29335c', '#669bbc', '#2a9d8f', '#8e44ad', '#c0392b', '#3d405b', '#118ab2', '#6a994e'];
+
+// A few starter stations so the page isn't empty on first visit.
+const DEFAULT_STATIONS = [
+  { name: 'SomaFM Groove Salad', url: 'https://ice1.somafm.com/groovesalad-128-mp3', color: '#2a9d8f' },
+  { name: 'SomaFM Drone Zone',   url: 'https://ice1.somafm.com/dronezone-128-mp3',   color: '#29335c' },
+  { name: 'KEXP Seattle',        url: 'https://kexp.streamguys1.com/kexp160.aac',     color: '#e4572e' },
+];
+
+function loadStations() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(STORAGE_KEY));
+    if (Array.isArray(saved)) return saved;
+  } catch (e) { /* storage blocked or corrupt: fall through to defaults */ }
+  return DEFAULT_STATIONS.slice();
+}
+function saveStations() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(stations)); } catch (e) {}
+}
+
+let stations = loadStations();
+let current = null; // the station object currently loaded in the player
+
+// ---------------------------------------------------------------------------
+// 2. Drawing the grid of station tiles
+// ---------------------------------------------------------------------------
+const grid = document.getElementById('grid');
+
+function initials(name) {
+  return name.split(/\s+/).filter(Boolean).slice(0, 2).map(w => w[0]).join('').toUpperCase();
+}
+
+function render() {
+  grid.innerHTML = '';
+  document.getElementById('empty').hidden = stations.length > 0;
+
+  stations.forEach((station, index) => {
+    const tile = document.createElement('button');
+    tile.className = 'tile' + (current && current.url === station.url ? ' playing' : '');
+    tile.style.background = station.color;
+    tile.innerHTML = `<span class="initials"></span><span class="name"></span>
+                      <span class="edit" role="button" aria-label="Edit">⋯</span>`;
+    // textContent (not innerHTML) so odd station names can't inject markup
+    tile.querySelector('.initials').textContent = initials(station.name);
+    tile.querySelector('.name').textContent = station.name;
+
+    tile.addEventListener('click', (e) => {
+      if (e.target.classList.contains('edit')) openEditor(index);
+      else togglePlay(station);
+    });
+    grid.appendChild(tile);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 3. Playing audio
+// ---------------------------------------------------------------------------
+const audio = document.getElementById('audio');
+const playBtn = document.getElementById('playBtn');
+const nowName = document.getElementById('nowName');
+const nowStatus = document.getElementById('nowStatus');
+const swatch = document.getElementById('swatch');
+
+function togglePlay(station) {
+  // Tapping the station that's already playing pauses it.
+  if (current && current.url === station.url && !audio.paused) {
+    stop();
+    return;
+  }
+  current = station;
+  audio.src = station.url;  // pointing the audio element at the stream...
+  audio.play().catch(err => { // ...and asking it to play is all "tuning in" is
+    setStatus('Could not play this stream');
+    console.warn(err);
+  });
+  nowName.textContent = station.name;
+  swatch.style.background = station.color;
+  updateMediaSession(station);
+  render();
+}
+
+function stop() {
+  // For live radio, "pause" should really mean stop: otherwise resuming plays
+  // stale buffered audio. Clearing src drops the connection entirely.
+  audio.pause();
+  audio.removeAttribute('src');
+  audio.load();
+  setStatus('Stopped');
+}
+
+function resume() {
+  if (current) togglePlay(current);
+}
+
+playBtn.addEventListener('click', () => {
+  if (!current) { if (stations[0]) togglePlay(stations[0]); return; }
+  audio.paused ? resume() : stop();
+});
+
+document.getElementById('volume').addEventListener('input', e => { audio.volume = e.target.value; });
+
+// The audio element fires events as its state changes; we mirror them in the UI.
+function setStatus(text) {
+  nowStatus.textContent = text;
+  playBtn.textContent = audio.paused ? '▶' : '❚❚';
+}
+audio.addEventListener('waiting', () => setStatus('Connecting…'));
+audio.addEventListener('playing', () => setStatus('Live'));
+audio.addEventListener('pause',   () => { if (!audio.error) setStatus('Stopped'); });
+audio.addEventListener('error',   () => { if (audio.getAttribute('src')) setStatus('Stream error'); });
+
+// Lock-screen / headphone controls
+function updateMediaSession(station) {
+  if (!('mediaSession' in navigator)) return;
+  navigator.mediaSession.metadata = new MediaMetadata({ title: station.name, artist: 'Live radio' });
+  navigator.mediaSession.setActionHandler('play', resume);
+  navigator.mediaSession.setActionHandler('pause', stop);
+  navigator.mediaSession.setActionHandler('stop', stop);
+}
+
+// ---------------------------------------------------------------------------
+// 4. Adding / editing a station by hand
+// ---------------------------------------------------------------------------
+const editDialog = document.getElementById('editDialog');
+const fName = document.getElementById('fName');
+const fUrl = document.getElementById('fUrl');
+const colorPicker = document.getElementById('colorPicker');
+let editingIndex = null;
+let chosenColor = COLORS[0];
+
+COLORS.forEach(c => {
+  const b = document.createElement('button');
+  b.type = 'button'; b.style.background = c; b.dataset.color = c;
+  b.addEventListener('click', () => pickColor(c));
+  colorPicker.appendChild(b);
+});
+function pickColor(c) {
+  chosenColor = c;
+  colorPicker.querySelectorAll('button').forEach(b => b.classList.toggle('selected', b.dataset.color === c));
+}
+
+function openEditor(index = null, prefill = null) {
+  editingIndex = index;
+  const s = index !== null ? stations[index] : prefill || { name: '', url: '', color: COLORS[stations.length % COLORS.length] };
+  document.getElementById('editTitle').textContent = index !== null ? 'Edit station' : 'Add station';
+  document.getElementById('deleteBtn').hidden = index === null;
+  fName.value = s.name; fUrl.value = s.url; pickColor(s.color);
+  editDialog.showModal();
+}
+
+document.getElementById('addBtn').addEventListener('click', () => openEditor());
+document.getElementById('cancelEdit').addEventListener('click', () => editDialog.close());
+
+document.getElementById('editForm').addEventListener('submit', () => {
+  const station = { name: fName.value.trim(), url: fUrl.value.trim(), color: chosenColor };
+  if (editingIndex !== null) stations[editingIndex] = station;
+  else stations.push(station);
+  saveStations(); render();
+});
+
+document.getElementById('deleteBtn').addEventListener('click', () => {
+  if (!confirm(`Delete "${stations[editingIndex].name}"?`)) return;
+  stations.splice(editingIndex, 1);
+  saveStations(); render(); editDialog.close();
+});
+
+// ---------------------------------------------------------------------------
+// 5. Searching the Radio Browser directory
+// ---------------------------------------------------------------------------
+// Radio Browser runs several mirror servers; if one is down we try the next.
+const API_SERVERS = ['https://de1.api.radio-browser.info', 'https://fi1.api.radio-browser.info', 'https://at1.api.radio-browser.info'];
+
+async function searchStations(term) {
+  const params = new URLSearchParams({
+    name: term, limit: 40, hidebroken: 'true', order: 'clickcount', reverse: 'true',
+  });
+  for (const server of API_SERVERS) {
+    try {
+      const res = await fetch(`${server}/json/stations/search?${params}`);
+      if (res.ok) return await res.json();
+    } catch (e) { /* try next mirror */ }
+  }
+  throw new Error('Directory unreachable');
+}
+
+const findDialog = document.getElementById('findDialog');
+const results = document.getElementById('results');
+const searchStatus = document.getElementById('searchStatus');
+
+document.getElementById('findBtn').addEventListener('click', () => {
+  findDialog.showModal();
+  document.getElementById('query').focus();
+});
+document.getElementById('closeFind').addEventListener('click', () => findDialog.close());
+
+document.getElementById('searchForm').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const term = document.getElementById('query').value.trim();
+  if (!term) return;
+  results.innerHTML = '';
+  searchStatus.textContent = 'Searching…';
+  try {
+    // Keep only https streams: http ones won't play on an https page.
+    const found = (await searchStations(term)).filter(s => s.url_resolved.startsWith('https://'));
+    searchStatus.textContent = found.length ? `${found.length} stations` : 'No playable (https) stations found.';
+    found.forEach(s => results.appendChild(resultRow(s)));
+  } catch (err) {
+    searchStatus.textContent = 'Could not reach the directory. Try again later.';
+  }
+});
+
+function resultRow(s) {
+  const li = document.createElement('li');
+  li.innerHTML = `<div class="meta"><div></div><div></div></div>
+                  <button type="button" class="preview">▶</button>
+                  <button type="button" class="primary add">Add</button>`;
+  const details = [s.country, s.tags && s.tags.split(',').slice(0, 3).join(', '), s.codec && `${s.codec} ${s.bitrate || ''}k`]
+    .filter(Boolean).join(' · ');
+  li.querySelector('.meta div:first-child').textContent = s.name.trim();
+  li.querySelector('.meta div:last-child').textContent = details;
+
+  const station = { name: s.name.trim(), url: s.url_resolved, color: COLORS[Math.floor(Math.random() * COLORS.length)] };
+  li.querySelector('.preview').addEventListener('click', () => togglePlay(station));
+  li.querySelector('.add').addEventListener('click', (e) => {
+    if (stations.some(x => x.url === station.url)) { e.target.textContent = 'Added'; return; }
+    stations.push(station); saveStations(); render();
+    e.target.textContent = 'Added'; e.target.disabled = true;
+  });
+  return li;
+}
+
+render();
+</script>
+</body>
+</html>
